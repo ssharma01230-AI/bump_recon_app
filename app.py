@@ -33,6 +33,34 @@ from reconciliation_engine import (
     update_overview_workbook,
 )
 
+
+def _sanitise_workbook_tables(workbook) -> list[str]:
+    """
+    Some Excel files contain malformed table references (where the stored
+    object is a string instead of a Table). openpyxl >= 3.1.5 raises
+    AttributeError when saving these because `sheet.tables.items()` itself
+    tries to access `.ref` on every entry. We bypass the public API and
+    poke the internal dict directly. Returns the list of removed table
+    names for reporting.
+    """
+    from openpyxl.worksheet.table import Table
+    removed: list[str] = []
+    for sheet in workbook.worksheets:
+        # Access the underlying mapping directly to avoid triggering the
+        # bug inside the sanitiser itself. `sheet.tables` is a TableList,
+        # which is a normal dict subclass.
+        raw = sheet.tables
+        bad_keys = []
+        for name in list(dict.keys(raw)):
+            tbl = dict.__getitem__(raw, name)
+            if not isinstance(tbl, Table):
+                bad_keys.append(name)
+        for k in bad_keys:
+            dict.__delitem__(raw, k)
+            removed.append(f"{sheet.title}!{k}")
+    return removed
+
+
 # ---------------------------------------------------------------------------
 # Page config
 # ---------------------------------------------------------------------------
@@ -194,7 +222,7 @@ st.divider()
 # Run
 # ---------------------------------------------------------------------------
 
-if not st.button("▶️ Run reconciliation", type="primary", use_container_width=True):
+if not st.button("▶️ Run reconciliation", type="primary", width="stretch"):
     st.stop()
 
 try:
@@ -266,7 +294,7 @@ for u in result.scope_updates:
 df = pd.DataFrame(rows)
 st.dataframe(
     df,
-    use_container_width=True,
+    width="stretch",
     hide_index=True,
     column_config={
         "Baseline": st.column_config.NumberColumn(format="£%.2f"),
@@ -288,7 +316,7 @@ if result.unmatched_bump_scopes:
     } for u in result.unmatched_bump_scopes]
     st.dataframe(
         pd.DataFrame(new_rows),
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         column_config={"Latest BuMP Value": st.column_config.NumberColumn(format="£%.2f")},
     )
@@ -309,7 +337,20 @@ with st.expander("📝 Markdown summary preview"):
 
 st.subheader("Downloads")
 
-# Save workbook to memory
+# Save workbook to memory. First sanitise any malformed table references
+# that some Excel files contain (otherwise openpyxl raises AttributeError
+# on save). Reconciliation values are unaffected — only the stripey "Excel
+# Table" formatting is removed from any broken regions.
+removed_tables = _sanitise_workbook_tables(overview_wb)
+if removed_tables:
+    st.caption(
+        f"Note: {len(removed_tables)} malformed Excel Table reference(s) "
+        f"were stripped to allow the workbook to save. Data values are "
+        f"unaffected; only the table-style formatting is removed. "
+        f"Affected: {', '.join(removed_tables[:5])}"
+        + (f" (+{len(removed_tables)-5} more)" if len(removed_tables) > 5 else "")
+    )
+
 buf = io.BytesIO()
 overview_wb.save(buf)
 buf.seek(0)
@@ -325,7 +366,7 @@ with dl1:
         data=buf.getvalue(),
         file_name=xlsx_name,
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
+        width="stretch",
     )
 with dl2:
     st.download_button(
@@ -333,5 +374,5 @@ with dl2:
         data=markdown.encode("utf-8"),
         file_name=md_name,
         mime="text/markdown",
-        use_container_width=True,
+        width="stretch",
     )
